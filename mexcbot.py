@@ -1,94 +1,82 @@
-# mexctop_bot.py — MEXC Derivatives Top 20 by 7D % (debug version)
-import os, requests, datetime, sys
+# MEXC Derivatives — LIVE rolling 7D % (uses current price vs price 168h ago)
+import os, requests, datetime
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 BASE = "https://contract.mexc.com/api/v1"
 
-def log(*a):
-    print(*a, flush=True)
+# Drop illiquid symbols (approx USD notional in last 24h). Set 0 to disable.
+MIN_USD_VOL_24H = 50000
 
-def list_mexc_usdt_perps():
-    url = f"{BASE}/contract/detail"
-    log("GET", url)
-    r = requests.get(url, timeout=30)
+def log(*a): print(*a, flush=True)
+
+def list_usdt_perps():
+    r = requests.get(f"{BASE}/contract/detail", timeout=30)
     r.raise_for_status()
     items = r.json().get("data", [])
-    symbols = [it["symbol"] for it in items
-               if it.get("state") == 0 and str(it.get("symbol","")).endswith("_USDT")]
-    log(f"Found {len(symbols)} enabled USDT contracts")
-    return symbols
+    return [it["symbol"] for it in items
+            if it.get("state") == 0 and str(it.get("symbol","")).endswith("_USDT")]
 
-def last_8_daily_closes(symbol):
-    url = f"{BASE}/contract/kline/{symbol}"
-    params = {"interval": "Day1", "limit": 8}
-    log("GET", url, params)
-    r = requests.get(url, params=params, timeout=30)
+def tickers_map():
+    """Return dict: symbol -> dict(lastPrice, notional24)"""
+    r = requests.get(f"{BASE}/contract/ticker", timeout=30)
     r.raise_for_status()
-    j = r.json()
-    d = j.get("data")
+    out = {}
+    for t in r.json().get("data", []):
+        sym = t.get("symbol")
+        last = float(t.get("lastPrice") or 0)
+        amt24 = float(t.get("amount24") or 0)
+        out[sym] = {"last": last, "notional24": last * amt24}
+    return out
 
-    # Handle two possible shapes:
-    # A) dict of lists: {"time":[...], "close":[...], ...}
-    # B) list of arrays: [[time, open, high, low, close, volume], ...]
-    closes = []
-    times = []
-    if isinstance(d, dict) and "close" in d and "time" in d:
-        times = d.get("time") or []
-        closes = d.get("close") or []
-        pairs = list(zip(times, closes))
-    elif isinstance(d, list) and d and isinstance(d[0], (list, tuple)) and len(d[0]) >= 5:
-        # index 0=time, 4=close per MEXC format
-        pairs = [(row[0], row[4]) for row in d]
-    else:
-        log("Unexpected Kline format for", symbol, "payload keys:", (d.keys() if isinstance(d, dict) else type(d)))
-        return []
-
-    return pairs
-
-def calc_7d_change(closes):
-    if len(closes) < 8: 
-        return None
-    last = float(closes[-1][1])
-    prev = float(closes[-8][1])
-    if prev == 0: 
-        return None
-    return (last/prev - 1.0) * 100.0
-
-def gather_top20():
-    symbols = list_mexc_usdt_perps()
+def price_168h_ago(symbol):
+    """Get close price 168 hours ago from hourly klines."""
+    # Need 169 points: current hour back to T-168h
+    r = requests.get(f"{BASE}/contract/kline/{symbol}",
+                     params={"interval":"Min60","limit":169}, timeout=30)
+    r.raise_for_status()
+    d = r.json().get("data")
     rows = []
-    for idx, sym in enumerate(symbols, 1):
-        try:
-            closes = last_8_daily_closes(sym)
-            pct = calc_7d_change(closes)
-            if pct is not None:
-                rows.append((sym, pct))
-        except Exception as e:
-            log(f"[WARN] {sym} failed: {e}")
+    if isinstance(d, list):
+        # row: [time, open, high, low, close, volume]
+        rows = [(row[0], float(row[4])) for row in d if isinstance(row, (list,tuple)) and len(row) >= 5]
+    elif isinstance(d, dict) and "time" in d and "close" in d:
+        rows = list(zip(d["time"], [float(x) for x in d["close"]]))
+    rows.sort(key=lambda x: x[0])  # ascending
+    if len(rows) < 169:  # not enough history
+        return None
+    # index 0..168 (169 items). The first element is ~168h ago.
+    return rows[0][1]
+
+def compute_live_7d(symbols, tmap):
+    rows = []
+    for i, sym in enumerate(symbols, 1):
+        info = tmap.get(sym)
+        if not info or info["last"] <= 0:
             continue
-        if idx % 50 == 0:
-            log(f"Scanned {idx}/{len(symbols)} contracts…")
+        base = price_168h_ago(sym)
+        if base and base > 0:
+            pct = (info["last"]/base - 1.0) * 100.0
+            rows.append((sym, pct))
+        if i % 50 == 0:
+            log(f"Processed {i}/{len(symbols)} symbols…")
     rows.sort(key=lambda x: x[1], reverse=True)
-    log(f"Computed 7D change for {len(rows)} contracts; top 3 preview:", rows[:3])
     return rows[:20]
 
 def format_msg(rows):
     ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"📈 **MEXC Derivatives — Top 20 by 7D %** (updated {ts})"]
+    lines = [f"⚡ **MEXC Derivatives — LIVE Top 20 by Rolling 7D %**  \nUpdated {ts}"]
     for i, (sym, pct) in enumerate(rows, 1):
-        pretty = sym.replace("_", "/")
-        lines.append(f"{i:>2}. `{pretty}`  7D: {pct:+.2f}%")
+        lines.append(f"{i:>2}. `{sym.replace('_','/')}`  7D: {pct:+.2f}%")
     return "\n".join(lines) if rows else "No data."
 
-def post_discord(text):
-    log("POST Discord webhook (message length:", len(text), ")")
-    r = requests.post(WEBHOOK, json={"content": text}, timeout=30)
-    log("Discord status:", r.status_code)
-    r.raise_for_status()   # Discord returns 204 on success
+def send(msg):
+    r = requests.post(WEBHOOK, json={"content": msg}, timeout=30)
+    r.raise_for_status()
 
 if __name__ == "__main__":
-    top = gather_top20()
-    msg = format_msg(top)
-    if not top:
-        log("No rows to send; message:", msg)
-    post_discord(msg)
+    symbols = list_usdt_perps()
+    tmap = tickers_map()
+    if MIN_USD_VOL_24H > 0:
+        symbols = [s for s in symbols if tmap.get(s, {}).get("notional24", 0) >= MIN_USD_VOL_24H]
+    top = compute_live_7d(symbols, tmap)
+    send(format_msg(top))
