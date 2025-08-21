@@ -1,0 +1,20 @@
+name: MEXC Derivatives Top 20 (7D)
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"   # runs every 2 hours (UTC)
+  workflow_dispatch:        # lets you run it manually now
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install requests
+      - name: Run bot
+        run: python mexctop_bot.py
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
