@@ -15,6 +15,6 @@ jobs:
           python-version: "3.x"
       - run: pip install requests
       - name: Run bot
-        run: python mexctop_bot.py
+        run: python mexcbot.py
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
