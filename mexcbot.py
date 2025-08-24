@@ -1,4 +1,4 @@
-# MEXC Derivatives — LIVE rolling 3D / 7D / 20D % leaderboards (table output)
+# MEXC Derivatives — LIVE rolling 3D / 7D / 20D % leaderboards (sectioned output)
 import os, requests, datetime
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK"]
@@ -48,7 +48,7 @@ def base_symbol(sym):
     # "OKB_USDT" -> "OKB"
     return sym.split("_", 1)[0]
 
-# ---------- NEW: compute 3D / 7D / 20D live changes ----------
+# ---------- compute 3D / 7D / 20D live changes ----------
 def compute_changes(symbols, tmap):
     """
     For each symbol, compute LIVE rolling % change vs:
@@ -65,18 +65,15 @@ def compute_changes(symbols, tmap):
 
         kl = hourly_klines(sym, need)
         n = len(kl)
-        # 72h ago: index -73 (0-based)
-        if n >= 73:
+        if n >= 73:   # 72h ago: index -73
             base72 = kl[-73][1]
             if base72 > 0:
                 p3[sym] = (last / base72 - 1.0) * 100.0
-        # 168h ago: index -169
-        if n >= 169:
+        if n >= 169:  # 168h ago: index -169
             base168 = kl[-169][1]
             if base168 > 0:
                 p7[sym] = (last / base168 - 1.0) * 100.0
-        # 480h ago: index -481
-        if n >= 481:
+        if n >= 481:  # 480h ago: index -481
             base480 = kl[-481][1]
             if base480 > 0:
                 p20[sym] = (last / base480 - 1.0) * 100.0
@@ -91,28 +88,25 @@ def leaderboard(pct_map, k=20):
     rows.sort(key=lambda x: x[1], reverse=True)
     return rows[:k]
 
-def pad(txt, width): return (txt + " " * width)[:width]
 def fmt_pct(x): return f"{x:+.0f}%"
 
-def format_table(top3, top7, top20):
-    """
-    Build a 3-column fixed-width table:
-      RANK. TICKER  +NNN%
-    """
-    ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    header = f"⚡ **MEXC Derivatives — LIVE Rolling Changes**  \nUpdated {ts}\n"
-    col_w = 20
-
-    lines = ["```"]
-    lines.append(pad("3D Top 20", col_w) + pad("7D Top 20", col_w) + pad("20D Top 20", col_w))
-    max_rows = 20
-    for i in range(max_rows):
-        c1 = f"{i+1:>2}. {top3[i][0]} {fmt_pct(top3[i][1])}"   if i < len(top3)  else ""
-        c2 = f"{i+1:>2}. {top7[i][0]} {fmt_pct(top7[i][1])}"   if i < len(top7)  else ""
-        c3 = f"{i+1:>2}. {top20[i][0]} {fmt_pct(top20[i][1])}" if i < len(top20) else ""
-        lines.append(pad(c1, col_w) + pad(c2, col_w) + pad(c3, col_w))
+def format_section(title, rows):
+    """One section: Title then a 2-column table 'TICKER | +NNN%'."""
+    lines = [f"**{title}**", "```"]
+    for name, pct in rows:
+        lines.append(f"{name} | {fmt_pct(pct)}")
     lines.append("```")
-    return header + "\n".join(lines)
+    return "\n".join(lines)
+
+def format_message(top3, top7, top20):
+    ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    header = f"⚡ **MEXC Derivatives — LIVE Rolling Changes**\nUpdated {ts}\n"
+    parts = [
+        format_section("3D Top 20", top3),
+        format_section("7D Top 20", top7),
+        format_section("20D Top 20", top20),
+    ]
+    return header + "\n\n".join(parts)
 
 def send(msg):
     r = requests.post(WEBHOOK, json={"content": msg}, timeout=30)
@@ -133,5 +127,5 @@ if __name__ == "__main__":
     top7  = leaderboard(p7, 20)
     top20 = leaderboard(p20, 20)
 
-    # Send table
-    send(format_table(top3, top7, top20))
+    # Send message: three sections one after another
+    send(format_message(top3, top7, top20))
