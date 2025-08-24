@@ -1,4 +1,4 @@
-# MEXC Derivatives — LIVE rolling 3D / 7D / 20D % leaderboards (sectioned output)
+# MEXC Derivatives — LIVE rolling 3D / 7D / 20D % leaderboards (sectioned output, two-column aligned)
 import os, requests, datetime
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK"]
@@ -36,7 +36,6 @@ def hourly_klines(symbol, limit):
     d = r.json().get("data")
     rows = []
     if isinstance(d, list):
-        # [time, open, high, low, close, volume]
         rows = [(row[0], float(row[4])) for row in d
                 if isinstance(row, (list, tuple)) and len(row) >= 5]
     elif isinstance(d, dict) and "time" in d and "close" in d:
@@ -50,11 +49,6 @@ def base_symbol(sym):
 
 # ---------- compute 3D / 7D / 20D live changes ----------
 def compute_changes(symbols, tmap):
-    """
-    For each symbol, compute LIVE rolling % change vs:
-      3D (72h), 7D (168h), 20D (480h).
-    Returns three dicts: {symbol: pct}
-    """
     p3, p7, p20 = {}, {}, {}
     need = 481  # enough history to reach 480h-ago baseline
     for i, sym in enumerate(symbols, 1):
@@ -83,7 +77,6 @@ def compute_changes(symbols, tmap):
     return p3, p7, p20
 
 def leaderboard(pct_map, k=20):
-    """Return list of (BASE, pct) sorted desc by pct."""
     rows = [(base_symbol(sym), pct) for sym, pct in pct_map.items()]
     rows.sort(key=lambda x: x[1], reverse=True)
     return rows[:k]
@@ -91,10 +84,12 @@ def leaderboard(pct_map, k=20):
 def fmt_pct(x): return f"{x:+.0f}%"
 
 def format_section(title, rows):
-    """One section: Title then a 2-column table 'TICKER | +NNN%'."""
+    """Section: Title then aligned 2-column table (Ticker left, % right)."""
+    col_w = 10  # ticker column width
     lines = [f"**{title}**", "```"]
     for name, pct in rows:
-        lines.append(f"{name} | {fmt_pct(pct)}")
+        # left align ticker, right align percentage
+        lines.append(f"{name:<{col_w}}{fmt_pct(pct):>6}")
     lines.append("```")
     return "\n".join(lines)
 
@@ -117,15 +112,12 @@ if __name__ == "__main__":
     symbols = list_usdt_perps()
     tmap = tickers_map()
 
-    # Liquidity filter
     if MIN_USD_VOL_24H > 0:
         symbols = [s for s in symbols if tmap.get(s, {}).get("notional24", 0) >= MIN_USD_VOL_24H]
 
-    # Compute LIVE changes and build top lists
     p3, p7, p20 = compute_changes(symbols, tmap)
     top3  = leaderboard(p3, 20)
     top7  = leaderboard(p7, 20)
     top20 = leaderboard(p20, 20)
 
-    # Send message: three sections one after another
     send(format_message(top3, top7, top20))
