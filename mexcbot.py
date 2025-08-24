@@ -1,4 +1,5 @@
-# MEXC Derivatives — LIVE rolling 3D / 7D / 20D % leaderboards (sectioned output, two-column aligned)
+# MEXC Derivatives — LIVE rolling 3D / 7D / 20D % leaderboards
+# (sectioned output, two-column text, bold exclusives)
 import os, requests, datetime
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK"]
@@ -81,27 +82,43 @@ def leaderboard(pct_map, k=20):
     rows.sort(key=lambda x: x[1], reverse=True)
     return rows[:k]
 
-def fmt_pct(x): return f"{x:+.0f}%"
+def fmt_pct(x): 
+    return f"{x:+.0f}%"
 
-def format_section(title, rows):
-    """Section: Title then aligned 2-column table (Ticker left, % right)."""
-    col_w = 10  # ticker column width
-    lines = [f"**{title}**", "```"]
+def format_section(title, rows, exclusive_names, ticker_col_w=10, pct_col_w=6):
+    """
+    Plain Markdown (no code fences) so **bold** works.
+    Two columns: ticker (left-padded to ticker_col_w), percent (right-padded to pct_col_w).
+    """
+    lines = [f"**{title}**"]
     for name, pct in rows:
-        # left align ticker, right align percentage
-        lines.append(f"{name:<{col_w}}{fmt_pct(pct):>6}")
-    lines.append("```")
+        # Bold ticker only if it's exclusive to this section
+        show = f"**{name}**" if name in exclusive_names else name
+        # pad based on raw ticker length so spacing stays consistent
+        pad_spaces = " " * max(ticker_col_w - len(name), 1)
+        pct_str = fmt_pct(pct).rjust(pct_col_w)
+        lines.append(f"{show}{pad_spaces}{pct_str}")
     return "\n".join(lines)
 
 def format_message(top3, top7, top20):
+    # Build exclusivity sets based on displayed base tickers
+    set3  = {n for n, _ in top3}
+    set7  = {n for n, _ in top7}
+    set20 = {n for n, _ in top20}
+    ex3   = set3  - (set7 | set20)
+    ex7   = set7  - (set3 | set20)
+    ex20  = set20 - (set3 | set7)
+
     ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     header = f"⚡ **MEXC Derivatives — LIVE Rolling Changes**\nUpdated {ts}\n"
     parts = [
-        format_section("3D Top 20", top3),
-        format_section("7D Top 20", top7),
-        format_section("20D Top 20", top20),
+        format_section("3D Top 20",  top3,  ex3),
+        "",
+        format_section("7D Top 20",  top7,  ex7),
+        "",
+        format_section("20D Top 20", top20, ex20),
     ]
-    return header + "\n\n".join(parts)
+    return header + "\n".join(parts)
 
 def send(msg):
     r = requests.post(WEBHOOK, json={"content": msg}, timeout=30)
