@@ -1,11 +1,12 @@
-# MEXC Derivatives — LIVE rolling 7D % (current price vs price 168h ago)
+# MEXC Derivatives — LIVE rolling 3D / 7D / 20D % leaderboards
+# current price (from /contract/ticker) vs hourly-kline prices 72h, 168h, 480h ago
 import os, requests, datetime
 
 WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 BASE = "https://contract.mexc.com/api/v1"
 
-# Drop illiquid symbols (approx USD notional in last 24h). Set 0 to disable.
-MIN_USD_VOL_24H = 50000
+# Filter out illiquid contracts by approx USD notional over last 24h (amount24 * lastPrice)
+MIN_USD_VOL_24H = 50000   # set to 0 to disable
 
 def log(*a): print(*a, flush=True)
 
@@ -22,14 +23,14 @@ def tickers_map():
     r.raise_for_status()
     out = {}
     for t in r.json().get("data", []):
-        sym = t.get("symbol")
-        last = float(t.get("lastPrice") or 0)
+        sym   = t.get("symbol")
+        last  = float(t.get("lastPrice") or 0)
         amt24 = float(t.get("amount24") or 0)
         out[sym] = {"last": last, "notional24": last * amt24}
     return out
 
 def hourly_klines(symbol, limit):
-    """Return list of (ts, close, volume) in ascending time order."""
+    """Return list of (ts, close) ascending by time."""
     r = requests.get(f"{BASE}/contract/kline/{symbol}",
                      params={"interval":"Min60","limit":limit}, timeout=30)
     r.raise_for_status()
@@ -37,13 +38,10 @@ def hourly_klines(symbol, limit):
     rows = []
     if isinstance(d, list):
         # [time, open, high, low, close, volume]
-        rows = [(row[0], float(row[4]), float(row[5] if len(row)>=6 and row[5] is not None else 0.0))
-                for row in d if isinstance(row, (list, tuple)) and len(row) >= 5]
+        rows = [(row[0], float(row[4])) for row in d
+                if isinstance(row, (list, tuple)) and len(row) >= 5]
     elif isinstance(d, dict) and "time" in d and "close" in d:
-        times  = d["time"]
-        closes = [float(x) for x in d["close"]]
-        vols   = [float(x) for x in d.get("vol", d.get("volume", [0]*len(times)))]
-        rows = list(zip(times, closes, vols))
+        rows = list(zip(d["time"], [float(x) for x in d["close"]]))
     rows.sort(key=lambda x: x[0])
     return rows
 
@@ -51,55 +49,75 @@ def base_symbol(sym):
     # "OKB_USDT" -> "OKB"
     return sym.split("_", 1)[0]
 
-def compute_live_7d(symbols, tmap, want_vol_spike=True):
+def compute_changes(symbols, tmap):
     """
-    Returns list of tuples: (symbol, pct7d, vol_spike_pct_or_None)
-    pct7d uses live last price vs price 168h ago.
-    vol_spike compares sum(volume last 168h) vs prior 168h.
+    For each symbol, compute rolling % change for:
+      3D (72h), 7D (168h), 20D (480h)
+    Returns three dicts: {sym: pct}, one per horizon.
     """
-    rows = []
+    top3, top7, top20 = {}, {}, {}
+    # Need up to 481 hours of history to reach 480h-ago reference point (+ some buffer not required)
+    need = 481
     for i, sym in enumerate(symbols, 1):
-        info = tmap.get(sym)
-        if not info or info["last"] <= 0:
+        last = tmap.get(sym, {}).get("last", 0.0)
+        if last <= 0:
             continue
 
-        # Pull enough hourly data to compute both price 168h ago and volume spike
-        need = 340 if want_vol_spike else 169
-        kl = hourly_klines(sym, need)
-        if len(kl) < 169:
-            continue
-
-        prior_price = kl[-169][1]  # exactly 168 hours back
-        if prior_price <= 0:
-            continue
-
-        pct = (info["last"]/prior_price - 1.0) * 100.0
-
-        vol_spike = None
-        if want_vol_spike and len(kl) >= 336:
-            last168 = sum(v for _, __, v in kl[-168:])
-            prev168 = sum(v for _, __, v in kl[-336:-168])
-            if prev168 > 0:
-                vol_spike = (last168/prev168 - 1.0) * 100.0
-
-        rows.append((sym, pct, vol_spike))
+        kl = hourly_klines(sym, need)  # last closed hours; live price comes from ticker
+        n = len(kl)
+        if n >= 73:   # 72h ago → index -73
+            base72 = kl[-73][1]
+            if base72 > 0:
+                top3[sym] = (last / base72 - 1.0) * 100.0
+        if n >= 169:  # 168h ago → index -169
+            base168 = kl[-169][1]
+            if base168 > 0:
+                top7[sym] = (last / base168 - 1.0) * 100.0
+        if n >= 481:  # 480h ago → index -481
+            base480 = kl[-481][1]
+            if base480 > 0:
+                top20[sym] = (last / base480 - 1.0) * 100.0
 
         if i % 50 == 0:
             log(f"Processed {i}/{len(symbols)} symbols…")
 
-    rows.sort(key=lambda x: x[1], reverse=True)
-    return rows[:20]
+    return top3, top7, top20
 
-def format_msg(rows):
+def leaderboard(pcts_dict, tmap, k=20):
+    """Return list of (BASE, pct) sorted desc by pct."""
+    rows = []
+    for sym, pct in pcts_dict.items():
+        rows.append((base_symbol(sym), pct))
+    rows.sort(key=lambda x: x[1], reverse=True)
+    return rows[:k]
+
+def pad(txt, width):
+    return (txt + " " * width)[:width]
+
+def format_table(top3, top7, top20):
+    """
+    Build a 3-column text table. Each column lists Top 20:
+    'RANK. TICKER  +NNN%'
+    """
     ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"⚡ **MEXC Derivatives — LIVE Top 20 by Rolling 7D %**  \nUpdated {ts}"]
-    for i, (sym, pct, vsp) in enumerate(rows, 1):
-        name = base_symbol(sym)
-        line = f"{i:>2}. {name}  {pct:+.0f}%"
-        if vsp is not None:
-            line += f"  · Vol {vsp:+.0f}%"
-        lines.append(line)
-    return "\n".join(lines) if rows else "No data."
+    header = f"⚡ **MEXC Derivatives — LIVE Rolling Changes**  \nUpdated {ts}\n"
+    col_w = 18  # column width for neat alignment
+
+    # Header row
+    out = [header, "```"]
+    out.append(pad("3D Top 20", col_w) + pad("7D Top 20", col_w) + pad("20D Top 20", col_w))
+
+    # Determine max rows (should be 20 each, but guard)
+    max_rows = max(len(top3), len(top7), len(top20), 20)
+
+    for i in range(max_rows):
+        c1 = f"{i+1:>2}. {top3[i][0]} {top3[i][1]:+ .0f}%" if i < len(top3) else ""
+        c2 = f"{i+1:>2}. {top7[i][0]} {top7[i][1]:+ .0f}%" if i < len(top7) else ""
+        c3 = f"{i+1:>2}. {top20[i][0]} {top20[i][1]:+ .0f}%" if i < len(top20) else ""
+        out.append(pad(c1, col_w) + pad(c2, col_w) + pad(c3, col_w))
+
+    out.append("```")
+    return "\n".join(out)
 
 def send(msg):
     r = requests.post(WEBHOOK, json={"content": msg}, timeout=30)
@@ -108,7 +126,18 @@ def send(msg):
 if __name__ == "__main__":
     symbols = list_usdt_perps()
     tmap = tickers_map()
+
+    # Liquidity filter
     if MIN_USD_VOL_24H > 0:
         symbols = [s for s in symbols if tmap.get(s, {}).get("notional24", 0) >= MIN_USD_VOL_24H]
-    top = compute_live_7d(symbols, tmap, want_vol_spike=True)
-    send(format_msg(top))
+
+    # Compute LIVE rolling changes
+    p3, p7, p20 = compute_changes(symbols, tmap)
+
+    # Build top 20 lists per horizon
+    top3  = leaderboard(p3, tmap, k=20)
+    top7  = leaderboard(p7, tmap, k=20)
+    top20 = leaderboard(p20, tmap, k=20)
+
+    # Send the 3-column table
+    send(format_table(top3, top7, top20))
